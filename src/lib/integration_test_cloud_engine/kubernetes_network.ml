@@ -75,9 +75,10 @@ module Node = struct
     let%bind _ = run_in_container node "ps aux" in
     let%bind _ = run_in_container node "./stop.sh" in
     let%bind _ = run_in_container node "ps aux" in
-    Malleable_error.return ()
+    return ()
 
   let get_pod_name t : string Malleable_error.t =
+    let open Malleable_error.Let_syntax in
     let args =
       List.append (base_kube_args t)
         [ "get"
@@ -88,23 +89,16 @@ module Node = struct
         ; "--no-headers" ]
     in
     let%bind run_result =
-      Deferred.bind ~f:Malleable_error.of_or_error_hard
+      Deferred.bind ~f:Malleable_error.or_hard_error
         (Process.run_lines ~prog:"kubectl" ~args ())
     in
     match run_result with
-    | Ok
-        { Malleable_error.Accumulator.computation_result= [pod_name]
-        ; soft_errors= _ } ->
-        Malleable_error.return pod_name
-    | Ok {Malleable_error.Accumulator.computation_result= []; soft_errors= _}
-      ->
-        Malleable_error.of_string_hard_error "get_pod_name: no result"
-    | Ok _ ->
-        Malleable_error.of_string_hard_error "get_pod_name: too many results"
-    | Error
-        { Malleable_error.Hard_fail.hard_error= e
-        ; Malleable_error.Hard_fail.soft_errors= _ } ->
-        Malleable_error.of_error_hard e.error
+    | [] ->
+        Malleable_error.hard_error_string "get_pod_name: no result"
+    | [pod_name] ->
+        return pod_name
+    | _ ->
+        Malleable_error.hard_error_string "get_pod_name: too many results"
 
   module Decoders = Graphql_lib.Decoders
 
@@ -196,7 +190,7 @@ module Node = struct
       ?(retry_on_graphql_error = false) ~query_name query_obj =
     let open Malleable_error.Let_syntax in
     if not node.graphql_enabled then
-      Malleable_error.of_string_hard_error
+      Malleable_error.hard_error_string
         "graphql is not enabled (hint: set `requires_graphql= true` in the \
          test config)"
     else
@@ -211,7 +205,7 @@ module Node = struct
           [%log error]
             "GraphQL request \"$query\" to \"$uri\" failed too many times"
             ~metadata ;
-          Malleable_error.of_string_hard_error_format
+          Malleable_error.hard_error_format
             "GraphQL \"%s\" to \"%s\" request failed too many times" query_name
             (Uri.to_string uri) )
         else
@@ -250,7 +244,7 @@ module Node = struct
                     (after (Time.Span.of_sec retry_delay_sec))
                 in
                 retry (n - 1)
-              else Malleable_error.of_string_hard_error err_string
+              else Malleable_error.hard_error_string err_string
       in
       let%bind () =
         Deferred.bind ~f:Malleable_error.return
@@ -273,7 +267,7 @@ module Node = struct
     let%bind self_id =
       match self_id_obj with
       | None ->
-          Malleable_error.of_string_hard_error "Peer not found"
+          Malleable_error.hard_error_string "Peer not found"
       | Some peer ->
           Malleable_error.return peer#peerId
     in
@@ -320,7 +314,7 @@ module Node = struct
       in
       match balance_obj#account with
       | None ->
-          Malleable_error.of_string_hard_error
+          Malleable_error.hard_error_string
             (sprintf
                !"Account with %{sexp:Mina_base.Account_id.t} not found"
                account_id)
@@ -552,7 +546,7 @@ let initialize ~logger network =
         "Not all pods were assigned to nodes and ready in time: \
          $bad_pod_statuses"
         ~metadata:[("bad_pod_statuses", bad_pod_statuses_json)] ;
-      Malleable_error.of_string_hard_error_format
+      Malleable_error.hard_error_format
         "Some pods either were not assigned to nodes or did deploy properly \
          (errors: %s)"
         (Yojson.Safe.to_string bad_pod_statuses_json)

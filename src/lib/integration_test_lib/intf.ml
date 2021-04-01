@@ -252,6 +252,8 @@ module Dsl = struct
 
     type t
 
+    val section : string -> 'a Malleable_error.t -> 'a Malleable_error.t
+
     val wait_for : t -> Wait_condition.t -> unit Malleable_error.t
 
     (* TODO: move this functionality to a more suitable location *)
@@ -262,15 +264,15 @@ module Dsl = struct
       -> network_state_reader:Network_state.t Broadcast_pipe.Reader.t
       -> [`Don't_call_in_tests of t]
 
-    type error_accumulator
+    type log_error_accumulator
 
     val watch_log_errors :
          logger:Logger.t
       -> event_router:Event_router.t
       -> on_fatal_error:(Logger.Message.t -> unit)
-      -> error_accumulator
+      -> log_error_accumulator
 
-    val lift_accumulated_errors : error_accumulator -> Test_error.Set.t
+    val lift_accumulated_errors : log_error_accumulator -> Test_error.Set.t
   end
 end
 
@@ -289,8 +291,6 @@ module Test = struct
     type dsl
 
     val config : Test_config.t
-
-    val expected_error_event_reprs : Structured_log_events.repr list
 
     val run : network -> dsl -> unit Malleable_error.t
   end

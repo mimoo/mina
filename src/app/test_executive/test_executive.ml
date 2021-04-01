@@ -1,5 +1,3 @@
-(* Trigger Mina artifact builds *)
-
 open Core
 open Async
 open Cmdliner
@@ -41,79 +39,72 @@ let engines : engine list =
   [("cloud", (module Integration_test_cloud_engine : Intf.Engine.S))]
 
 let tests : test list =
-  [ ("block-prod", (module Block_production_test.Make : Intf.Test.Functor_intf))
-  ; ("bootstrap", (module Bootstrap_test.Make : Intf.Test.Functor_intf))
+  [ ("reliability", (module Reliability_test.Make : Intf.Test.Functor_intf))
   ; ("send-payment", (module Send_payment_test.Make : Intf.Test.Functor_intf))
+    (*
   ; ( "pmt-timed-accts"
     , (module Payments_timed_accounts_test.Make : Intf.Test.Functor_intf) )
-    (*
   ; ( "bp-timed-accts"
     , (module Block_production_timed_accounts_test.Make : Intf.Test.Functor_intf) )
   *)
-  ; ("peers", (module Peers_test.Make : Intf.Test.Functor_intf))
-  ; ("common-prefix", (module Common_prefix.Make : Intf.Test.Functor_intf))
   ; ("archive-node", (module Archive_node_test.Make : Intf.Test.Functor_intf))
   ; ("common-prefix", (module Common_prefix.Make : Intf.Test.Functor_intf)) ]
 
-let report_test_errors error_set
-    (missing_event_reprs : Structured_log_events.repr list) =
+let report_test_errors error_set =
+  (* TODO: we should be able to show which sections passed as well *)
   let open Test_error in
   let open Test_error.Set in
   let errors =
-    List.concat
-      [ List.map error_set.soft_errors ~f:(fun err -> (`Soft, err))
-      ; List.map error_set.hard_errors ~f:(fun err -> (`Hard, err)) ]
+    Error_accumulator.combine
+      [ Error_accumulator.map error_set.soft_errors ~f:(fun err -> (`Soft, err))
+      ; Error_accumulator.map error_set.hard_errors ~f:(fun err -> (`Hard, err))
+      ]
   in
-  let num_errors_total = List.length errors in
-  let num_errors_internal =
-    List.length
-      (List.filter errors ~f:(fun (_, error) ->
-           match error with
-           | Internal_error _ ->
-               true
-           | Remote_error _ ->
-               false ))
+  let num_internal_errors =
+    errors |> Error_accumulator.all_errors
+    |> List.filter ~f:(function _, Internal_error _ -> true | _ -> false)
+    |> List.length
   in
-  let num_missing_events = List.length missing_event_reprs in
-  if num_errors_total > 0 then (
+  let display_error (severity, error) =
+    let color =
+      match severity with
+      | `Soft ->
+          Bash_colors.yellow
+      | `Hard ->
+          Bash_colors.red
+    in
+    Print.eprintf "  - %s%s%s\n" color (to_string error) Bash_colors.none
+  in
+  if Error_accumulator.error_count errors > 0 then (
     Print.eprintf "%s=== Errors encountered while running tests ===%s\n"
       Bash_colors.red Bash_colors.none ;
-    let sorted_errors =
-      List.sort errors ~compare:(fun (_, err1) (_, err2) ->
-          Time.compare (occurrence_time err1) (occurrence_time err2) )
+    (* ✓ peers are well connected at start
+     * × peers are well connected at end
+     *     INTERNAL ERROR: ...
+     *     REMOTE ERROR (block-producer-1): ...
+     *)
+    (* error contexts should have defined order... *)
+    let sort_test_errors =
+      List.sort ~compare:(fun (_, a) (_, b) -> Test_error.compare_time a b)
     in
-    List.iter sorted_errors ~f:(fun (error_type, error) ->
-        let color =
-          match error_type with
-          | `Soft ->
-              Bash_colors.yellow
-          | `Hard ->
-              Bash_colors.red
-        in
-        Print.eprintf "    %s%s%s\n" color (to_string error) Bash_colors.none
-    ) ;
-    Out_channel.(flush stderr) ) ;
-  if num_missing_events > 0 then (
-    Print.eprintf
-      "%s=== Missing expected log events while running tests ===%s\n"
-      Bash_colors.red Bash_colors.none ;
-    List.iter missing_event_reprs ~f:(fun repr ->
-        Print.eprintf "    %s%s%s\n" Bash_colors.red repr.event_name
-          Bash_colors.none ) ;
-    Out_channel.(flush stderr) ) ;
+    Core.Printf.printf "- Top Level\n" ;
+    errors.from_current_context |> sort_test_errors
+    |> List.iter ~f:display_error ;
+    String.Map.iteri errors.contextualized_errors
+      ~f:(fun ~key:context ~data:context_errors ->
+        Core.Printf.printf "- %s\n" context ;
+        context_errors |> sort_test_errors |> List.iter ~f:display_error ) ) ;
   (* TODO: re-enable error check after libp2p logs are cleaned up *)
-  (* if num_errors_total > 0 || num_missing_events > 0 then exit 1 else Deferred.unit *)
-  if num_errors_internal > 0 || num_missing_events > 0 then exit 1
-  else Deferred.unit
+  (* if Error_accumulator.error_count errors > 0 || num_missing_events > 0 then exit 1 else Deferred.unit *)
+  if num_internal_errors > 0 then exit 1 else Deferred.unit
 
 (* TODO: refactor cleanup system (smells like a monad for composing linear resources would help a lot) *)
 
 let dispatch_cleanup ~logger ~init_cleanup_func ~network_cleanup_func
     ~log_engine_cleanup_func ~lift_accumulated_errors_func ~net_manager_ref
     ~log_engine_ref ~network_state_writer_ref ~cleanup_deferred_ref
-    ~expected_error_event_reprs ~exit_reason ~test_result : unit Deferred.t =
+    ~exit_reason ~test_result : unit Deferred.t =
   let cleanup () : unit Deferred.t =
-    let open Structured_log_events in
     let%bind () = init_cleanup_func () in
     let%bind log_engine_cleanup_result =
       Option.value_map !log_engine_ref
@@ -129,66 +120,25 @@ let dispatch_cleanup ~logger ~init_cleanup_func ~network_cleanup_func
     in
     Option.value_map !network_state_writer_ref ~default:()
       ~f:Broadcast_pipe.Writer.close ;
-    let all_errors =
+    let errors =
       let open Test_error.Set in
       combine
         [ lift_accumulated_errors_func ()
         ; test_error_set
         ; of_hard_or_error log_engine_cleanup_result ]
     in
-    let expected_error_event_ids =
-      List.map expected_error_event_reprs ~f:(fun repr -> repr.id)
-    in
-    let is_expected_error (err : Test_error.t) =
-      match err with
-      | Internal_error _ ->
-          false
-      | Remote_error rem_err -> (
-        match rem_err.error_message.event_id with
-        | None ->
-            false
-        | Some id ->
-            List.mem expected_error_event_ids id
-              ~equal:Structured_log_events.equal_id )
-    in
-    let received_expected_errors, unexpected_errors =
-      Test_error.Set.partition_tf all_errors ~f:is_expected_error
-    in
-    let received_expected_error_ids =
-      Test_error.Set.concat_map received_expected_errors
-        ~f:(fun (err : Test_error.t) ->
-          match err with
-          | Internal_error _ ->
-              None
-          | Remote_error rem_err ->
-              rem_err.error_message.event_id )
-      |> List.filter_opt
-    in
-    let missing_expected_error_reprs =
-      List.filter expected_error_event_reprs ~f:(fun repr ->
-          not
-            (List.mem received_expected_error_ids repr.id
-               ~equal:Structured_log_events.equal_id) )
-    in
-    report_test_errors unexpected_errors missing_expected_error_reprs
-  in
-  let%bind hard_error_string =
-    Malleable_error.hard_error_to_string test_result
+    report_test_errors errors
   in
   match !cleanup_deferred_ref with
   | Some deferred ->
       [%log error]
         "additional call to cleanup testnet while already cleaning up \
-         (reason: $reason, hard error: $error)"
-        ~metadata:
-          [ ("reason", `String exit_reason)
-          ; ("error", `String hard_error_string) ] ;
+         (reason: $reason)"
+        ~metadata:[("reason", `String exit_reason)] ;
       deferred
   | None ->
-      [%log info] "cleaning up testnet (reason: $reason, hard error: $error)"
-        ~metadata:
-          [ ("reason", `String exit_reason)
-          ; ("error", `String hard_error_string) ] ;
+      [%log info] "cleaning up testnet (reason: $reason)"
+        ~metadata:[("reason", `String exit_reason)] ;
       let deferred = cleanup () in
       cleanup_deferred_ref := Some deferred ;
       deferred
@@ -250,7 +200,6 @@ let main inputs =
       ~log_engine_cleanup_func:Engine.Log_engine.destroy
       ~lift_accumulated_errors_func ~net_manager_ref ~log_engine_ref
       ~network_state_writer_ref ~cleanup_deferred_ref
-      ~expected_error_event_reprs:T.expected_error_event_reprs
   in
   (* run test while gracefully recovering handling exceptions and interrupts *)
   Signal.handle Signal.terminating ~f:(fun signal ->
@@ -261,7 +210,7 @@ let main inputs =
       in
       don't_wait_for
         (f_dispatch_cleanup ~exit_reason:"signal received"
-           ~test_result:(Malleable_error.of_error_hard error)) ) ;
+           ~test_result:(Malleable_error.hard_error error)) ) ;
   let%bind monitor_test_result =
     let on_fatal_error message =
       don't_wait_for
@@ -302,7 +251,7 @@ let main inputs =
         in
         let open Malleable_error.Let_syntax in
         let%bind network, dsl =
-          Deferred.bind init_result ~f:Malleable_error.of_or_error_hard
+          Deferred.bind init_result ~f:Malleable_error.or_hard_error
         in
         let%bind () = Engine.Network.initialize ~logger network in
         T.run network dsl )
@@ -317,7 +266,7 @@ let main inputs =
         (exit_reason, Deferred.return malleable_error)
     | Error exn ->
         [%log error] "%s" (Exn.to_string_mach exn) ;
-        ("exception thrown", Malleable_error.of_error_hard (Error.of_exn exn))
+        ("exception thrown", Malleable_error.hard_error (Error.of_exn exn))
   in
   let%bind () = f_dispatch_cleanup ~exit_reason ~test_result in
   exit 0

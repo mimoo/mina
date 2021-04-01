@@ -49,6 +49,8 @@ module Make (Engine : Intf.Engine.S) () :
     let t = {logger; network; event_router; network_state_reader} in
     `Don't_call_in_tests t
 
+  let section = Malleable_error.contextualize
+
   let hard_wait_for_network_state_predicate ~logger ~hard_timeout
       ~network_state_reader ~init ~check =
     let open Wait_condition in
@@ -131,10 +133,10 @@ module Make (Engine : Intf.Engine.S) () :
     in
     match result with
     | `Hard_timeout ->
-        Malleable_error.of_string_hard_error_format
-          "hit a hard timeout waiting for %s" condition.description
+        Malleable_error.hard_error_format "hit a hard timeout waiting for %s"
+          condition.description
     | `Failure error ->
-        Malleable_error.of_error_hard
+        Malleable_error.hard_error
           (Error.of_list
              [ Error.createf "wait_for hit an error waiting for %s"
                  condition.description
@@ -158,20 +160,20 @@ module Make (Engine : Intf.Engine.S) () :
 
   type log_error = Node.t * Event_type.Log_error.t
 
-  type error_accumulator =
+  type log_error_accumulator =
     { warn: log_error DynArray.t
     ; error: log_error DynArray.t
     ; faulty_peer: log_error DynArray.t
     ; fatal: log_error DynArray.t }
 
-  let empty_error_accumulator () =
+  let empty_log_error_accumulator () =
     { warn= DynArray.create ()
     ; error= DynArray.create ()
     ; faulty_peer= DynArray.create ()
     ; fatal= DynArray.create () }
 
   let watch_log_errors ~logger ~event_router ~on_fatal_error =
-    let error_accumulator = empty_error_accumulator () in
+    let log_error_accumulator = empty_log_error_accumulator () in
     ignore
       (Event_router.on event_router Event_type.Log_error
          ~f:(fun node message ->
@@ -179,13 +181,13 @@ module Make (Engine : Intf.Engine.S) () :
            let acc =
              match message.level with
              | Warn ->
-                 error_accumulator.warn
+                 log_error_accumulator.warn
              | Error ->
-                 error_accumulator.error
+                 log_error_accumulator.error
              | Faulty_peer ->
-                 error_accumulator.faulty_peer
+                 log_error_accumulator.faulty_peer
              | Fatal ->
-                 error_accumulator.fatal
+                 log_error_accumulator.fatal
              | _ ->
                  failwith "unexpected log level encountered"
            in
@@ -195,9 +197,9 @@ module Make (Engine : Intf.Engine.S) () :
                ~metadata:[("error", Logger.Message.to_yojson message)] ;
              on_fatal_error message ) ;
            Deferred.return `Continue )) ;
-    error_accumulator
+    log_error_accumulator
 
-  let lift_accumulated_errors error_accumulator =
+  let lift_accumulated_errors {warn; faulty_peer; error; fatal} =
     let lift error_array =
       DynArray.to_list error_array
       |> List.map ~f:(fun (node, message) ->
@@ -205,10 +207,12 @@ module Make (Engine : Intf.Engine.S) () :
                {node_id= Node.id node; error_message= message} )
     in
     let soft_errors =
-      lift error_accumulator.warn @ lift error_accumulator.faulty_peer
+      Test_error.Error_accumulator.of_contextualized_list "logs"
+        (lift warn @ lift faulty_peer)
     in
     let hard_errors =
-      lift error_accumulator.error @ lift error_accumulator.fatal
+      Test_error.Error_accumulator.of_contextualized_list "logs"
+        (lift error @ lift fatal)
     in
     {Test_error.Set.soft_errors; hard_errors}
 end
