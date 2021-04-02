@@ -17,7 +17,8 @@ module Make (Inputs : Intf.Test.Inputs_intf) = struct
     let open Test_config in
     let open Test_config.Block_producer in
     { default with
-      block_producers=
+      requires_graphql= true
+    ; block_producers=
         [ {balance= "1000"; timing= Untimed}
         ; {balance= "1000"; timing= Untimed}
         ; {balance= "1000"; timing= Untimed} ]

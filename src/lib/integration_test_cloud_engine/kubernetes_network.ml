@@ -287,7 +287,7 @@ module Node = struct
     in
     match result#bestChain with
     | None | Some [||] ->
-        Malleable_error.of_string_hard_error "failed to get best chains"
+        Malleable_error.hard_error_string "failed to get best chains"
     | Some chain ->
         Malleable_error.return
         @@ List.map ~f:(fun block -> block#stateHash) (Array.to_list chain)

@@ -87,12 +87,12 @@ let report_test_errors error_set =
     let sort_test_errors =
       List.sort ~compare:(fun (_, a) (_, b) -> Test_error.compare_time a b)
     in
-    Core.Printf.printf "- Top Level\n" ;
+    Print.eprintf "- Top Level\n" ;
     errors.from_current_context |> sort_test_errors
     |> List.iter ~f:display_error ;
     String.Map.iteri errors.contextualized_errors
       ~f:(fun ~key:context ~data:context_errors ->
-        Core.Printf.printf "- %s\n" context ;
+        Print.eprintf "- %s\n" context ;
         context_errors |> sort_test_errors |> List.iter ~f:display_error ) ) ;
   (* TODO: re-enable error check after libp2p logs are cleaned up *)
   (* if Error_accumulator.error_count errors > 0 || num_missing_events > 0 then exit 1 else Deferred.unit *)
