@@ -217,10 +217,12 @@ macos-setup-download:
 
 setup-opam:
 	./scripts/setup-opam.sh
+	./scripts/pin-external-packages.sh
 
 macos-setup:
 	./scripts/macos-setup-brew.sh
 	./scripts/setup-opam.sh
+	./scripts/pin-external-packages.sh
 
 ########################################
 ## Containers and container management

@@ -1,8 +1,11 @@
 #!/bin/sh
 
-# update and pin packages, used by CI
+# Extlib gets automatically installed, but we want our pin, so we should
+# uninstall here
+opam uninstall extlib
 
-PACKAGES="ocaml-sodium rpc_parallel ocaml-extlib ocaml-extlib async_kernel coda_base58 graphql_ppx"
+# update and pin packages, used by CI
+PACKAGES="ocaml-sodium rpc_parallel ocaml-extlib async_kernel"
 
 git submodule sync && git submodule update --init --recursive
 
